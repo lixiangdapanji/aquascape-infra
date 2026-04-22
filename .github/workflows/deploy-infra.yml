@@ -1,0 +1,69 @@
+name: deploy-infra
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target environment"
+        type: choice
+        options: [dev, stage, prod]
+        default: dev
+      stacks:
+        description: "Stack pattern (e.g. AquascapeStudio-App-dev or '*')"
+        default: "*"
+
+concurrency:
+  # One deploy per (env, workflow) — never step on a concurrent prod deploy.
+  group: deploy-infra-${{ github.event.inputs.env || 'dev' }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.env || 'dev' }}
+    env:
+      TARGET_ENV: ${{ github.event.inputs.env || 'dev' }}
+      STACKS: ${{ github.event.inputs.stacks || 'AquascapeStudio-Network-*,AquascapeStudio-Edge-*,AquascapeStudio-App-*' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+      - run: npm ci
+
+      - name: pick AWS role
+        id: role
+        run: |
+          case "$TARGET_ENV" in
+            dev)   echo "arn=${{ secrets.AWS_DEPLOY_ROLE_DEV }}"   >> "$GITHUB_OUTPUT";;
+            stage) echo "arn=${{ secrets.AWS_DEPLOY_ROLE_STAGE }}" >> "$GITHUB_OUTPUT";;
+            prod)  echo "arn=${{ secrets.AWS_DEPLOY_ROLE_PROD }}"  >> "$GITHUB_OUTPUT";;
+            *) echo "unknown env: $TARGET_ENV"; exit 1;;
+          esac
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ steps.role.outputs.arn }}
+          aws-region: us-east-1
+
+      - name: cdk diff
+        run: |
+          npx cdk diff --context env="$TARGET_ENV" \
+            AquascapeStudio-Network-"$TARGET_ENV" \
+            AquascapeStudio-Edge-"$TARGET_ENV" \
+            AquascapeStudio-App-"$TARGET_ENV" || true
+
+      - name: cdk deploy
+        run: |
+          npx cdk deploy --require-approval never --context env="$TARGET_ENV" \
+            AquascapeStudio-Network-"$TARGET_ENV" \
+            AquascapeStudio-Edge-"$TARGET_ENV" \
+            AquascapeStudio-App-"$TARGET_ENV"

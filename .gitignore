@@ -1,0 +1,26 @@
+node_modules/
+dist/
+cdk.out/
+cdk.context.json
+.cdk.staging/
+
+# editors
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# env
+.env
+.env.*
+!.env.example
+
+# typescript
+*.tsbuildinfo
