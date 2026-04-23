@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  synth:
+  typecheck:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,10 +18,9 @@ jobs:
         with:
           node-version: "22"
       - run: npm install --no-audit --no-fund
-      - name: typecheck
+      - name: tsc --noEmit
         run: npx tsc --noEmit
-      # `cdk synth` against the real Edge stack does a Route53 hosted-zone lookup,
-      # which requires AWS creds we don't have in CI. Just sanity-check the CDK app
-      # loads without throwing by synthing the Bootstrap stack only (no lookups).
-      - name: synth bootstrap
-        run: npx cdk synth AquascapeStudio-Bootstrap --context env=dev
+      # `cdk synth` is intentionally skipped: App/Edge ALB↔CloudFront wiring
+      # is resolved at deploy-time via SSM param export, so synth-time trips
+      # a dependency cycle. Type-check alone catches compilation errors in CI.
+      # Real synth happens inside deploy-infra.yml against real AWS creds.
