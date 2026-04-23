@@ -10,7 +10,7 @@ const app = new cdk.App();
 
 const ACCOUNT = "063418083301";
 const REGION = "us-east-1";
-const GITHUB_USER = "lixiangdapanji";
+const GITHUB_USER = "aquascape-studio";
 const DOMAIN = "efferves.live";
 
 /**

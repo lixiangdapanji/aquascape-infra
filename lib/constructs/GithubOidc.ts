@@ -35,14 +35,12 @@ export class GithubOidc extends Construct {
     });
 
     for (const env of props.environments) {
-      const subjectPatterns = props.repoNames.map(
-        (repo) => `repo:${props.githubUser}/${repo}:environment:${env}`,
-      );
+      const subjectPattern = `repo:${props.githubUser}/aquascape-*:environment:${env}`;
 
       const principal = new WebIdentityPrincipal(provider.openIdConnectProviderArn, {
         StringEquals: { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
         "ForAnyValue:StringLike": {
-          "token.actions.githubusercontent.com:sub": subjectPatterns,
+          "token.actions.githubusercontent.com:sub": [subjectPattern],
         },
       });
 
