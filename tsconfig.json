@@ -22,8 +22,8 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": ["node", "jest"]
   },
-  "include": ["bin/**/*.ts", "lib/**/*.ts"],
+  "include": ["bin/**/*.ts", "lib/**/*.ts", "test/**/*.ts"],
   "exclude": ["node_modules", "cdk.out", "dist"]
 }

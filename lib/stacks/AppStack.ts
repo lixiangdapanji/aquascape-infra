@@ -1,14 +1,5 @@
-import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput } from "aws-cdk-lib";
+import { Stack, StackProps, RemovalPolicy, Duration, CfnOutput, Tags } from "aws-cdk-lib";
 import { Construct } from "constructs";
-import {
-  AllowedMethods,
-  CachePolicy,
-  OriginRequestPolicy,
-  OriginProtocolPolicy,
-  ViewerProtocolPolicy,
-} from "aws-cdk-lib/aws-cloudfront";
-import { LoadBalancerV2Origin } from "aws-cdk-lib/aws-cloudfront-origins";
-import { Distribution } from "aws-cdk-lib/aws-cloudfront";
 import { IVpc, Peer, Port, SecurityGroup, SubnetType } from "aws-cdk-lib/aws-ec2";
 import {
   Cluster,
@@ -41,14 +32,20 @@ import {
 } from "aws-cdk-lib/aws-cloudwatch";
 import { SnsAction } from "aws-cdk-lib/aws-cloudwatch-actions";
 import { StringParameter } from "aws-cdk-lib/aws-ssm";
+import { ICertificate } from "aws-cdk-lib/aws-certificatemanager";
+import { PolicyStatement, Effect } from "aws-cdk-lib/aws-iam";
 import { Budget } from "./Budget";
 
 export interface AppStackProps extends StackProps {
   envName: "dev" | "stage" | "prod";
   domainName: string;
   vpc: IVpc;
-  distribution: Distribution;
+  /** ACM certificate (us-east-1) used for the HTTPS listener on the ALB. */
+  certificate: ICertificate;
 }
+
+/** Name of the CloudFormation export carrying the ALB DNS name. */
+export const albDnsExportName = (envName: string) => `aquascape-${envName}-alb-dns`;
 
 /**
  * App-tier: ECS Fargate cluster with THREE services behind one ALB.
@@ -79,10 +76,12 @@ export class AppStack extends Stack {
     super(scope, id, props);
 
     const isProd = props.envName === "prod";
+    const env = props.envName;
+    const commonTags = { project: "aquascape-studio", env };
 
     // ---- Cluster ----
     this.cluster = new Cluster(this, "Cluster", {
-      clusterName: `aquascape-${props.envName}`,
+      clusterName: `aquascape-${env}`,
       vpc: props.vpc,
       containerInsights: isProd,
       // Cloud Map namespace for internal service discovery (api → sim).
@@ -92,14 +91,23 @@ export class AppStack extends Stack {
     });
 
     // ---- ECR repos (one per deployable service) ----
+    // web: MUTABLE tags, keep last 10 images (per feature spec)
+    const webRepo = new Repository(this, "Repo-web", {
+      repositoryName: `aquascape-web-${env}`,
+      imageTagMutability: TagMutability.MUTABLE,
+      lifecycleRules: [{ maxImageCount: 10 }],
+      removalPolicy: isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
+    });
+    Tags.of(webRepo).add("project", commonTags.project);
+    Tags.of(webRepo).add("env", env);
+
     const mkRepo = (name: string) =>
       new Repository(this, `Repo-${name}`, {
-        repositoryName: `aquascape-${name}-${props.envName}`,
+        repositoryName: `aquascape-${name}-${env}`,
         imageTagMutability: TagMutability.IMMUTABLE,
         lifecycleRules: [{ maxImageCount: 20 }],
         removalPolicy: isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
       });
-    const webRepo = mkRepo("web");
     const apiRepo = mkRepo("api");
     const simRepo = mkRepo("sim");
 
@@ -172,15 +180,20 @@ export class AppStack extends Stack {
       description: `aquascape ALB SG (${props.envName})`,
       allowAllOutbound: true,
     });
-    albSg.addIngressRule(Peer.anyIpv4(), Port.tcp(80), "HTTP from CloudFront");
+    albSg.addIngressRule(Peer.anyIpv4(), Port.tcp(80), "HTTP from CloudFront (redirect to HTTPS)");
+    albSg.addIngressRule(Peer.anyIpv4(), Port.tcp(443), "HTTPS from CloudFront");
+    Tags.of(albSg).add("project", commonTags.project);
+    Tags.of(albSg).add("env", env);
 
     this.loadBalancer = new ApplicationLoadBalancer(this, "Alb", {
       vpc: props.vpc,
       internetFacing: true,
-      loadBalancerName: `aquascape-${props.envName}`,
+      loadBalancerName: `aquascape-${env}`,
       securityGroup: albSg,
       vpcSubnets: { subnetType: SubnetType.PUBLIC },
     });
+    Tags.of(this.loadBalancer).add("project", commonTags.project);
+    Tags.of(this.loadBalancer).add("env", env);
 
     // ---- Shared log group helper ----
     const mkLogGroup = (name: string) =>
@@ -191,12 +204,45 @@ export class AppStack extends Stack {
       });
 
     // ---- WEB service (Next.js) ----
+    // 0.5 vCPU / 1 GB, scoped task role: SSM read + CloudWatch logs write
     const webLogs = mkLogGroup("web");
     const webTask = new FargateTaskDefinition(this, "WebTaskDef", {
-      family: `aquascape-web-${props.envName}`,
-      cpu: 256,
-      memoryLimitMiB: 512,
+      family: `aquascape-web-${env}`,
+      cpu: 512,   // 0.5 vCPU
+      memoryLimitMiB: 1024,
     });
+    Tags.of(webTask).add("project", commonTags.project);
+    Tags.of(webTask).add("env", env);
+
+    // Scoped SSM read permission (only /aquascape/<env>/* params)
+    webTask.taskRole.addToPrincipalPolicy(new PolicyStatement({
+      sid: "SsmReadAquascapeParams",
+      effect: Effect.ALLOW,
+      actions: [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath",
+      ],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/aquascape/${env}/*`,
+      ],
+    }));
+
+    // CloudWatch Logs write (restricted to the web log group)
+    webTask.taskRole.addToPrincipalPolicy(new PolicyStatement({
+      sid: "CwLogsWriteWeb",
+      effect: Effect.ALLOW,
+      actions: [
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams",
+      ],
+      resources: [
+        webLogs.logGroupArn,
+        `${webLogs.logGroupArn}:*`,
+      ],
+    }));
+
     webTask.addContainer("web", {
       containerName: "web",
       image: ContainerImage.fromRegistry("public.ecr.aws/nginx/nginx:stable"),
@@ -204,21 +250,23 @@ export class AppStack extends Stack {
       logging: LogDriver.awsLogs({ streamPrefix: "web", logGroup: webLogs }),
       environment: {
         NODE_ENV: isProd ? "production" : "development",
-        AQUASCAPE_ENV: props.envName,
-        NEXT_PUBLIC_API_BASE_URL: `https://${props.envName === "prod" ? "" : `${props.envName}.`}${props.domainName}/grpc`,
+        AQUASCAPE_ENV: env,
+        NEXT_PUBLIC_API_BASE_URL: `https://${env === "prod" ? "" : `${env}.`}${props.domainName}/grpc`,
       },
       essential: true,
     });
 
     const webSg = new SecurityGroup(this, "WebSg", {
       vpc: props.vpc,
-      description: `aquascape web task SG (${props.envName})`,
+      description: `aquascape web task SG (${env})`,
       allowAllOutbound: true,
     });
     webSg.addIngressRule(albSg, Port.tcp(3000), "ALB → web");
+    Tags.of(webSg).add("project", commonTags.project);
+    Tags.of(webSg).add("env", env);
 
     this.webService = new FargateService(this, "WebService", {
-      serviceName: `aquascape-web-${props.envName}`,
+      serviceName: `aquascape-web-${env}`,
       cluster: this.cluster,
       taskDefinition: webTask,
       desiredCount: isProd ? 2 : 1,
@@ -230,6 +278,16 @@ export class AppStack extends Stack {
       enableExecuteCommand: !isProd,
       circuitBreaker: { rollback: true },
       healthCheckGracePeriod: Duration.seconds(60),
+    });
+    Tags.of(this.webService).add("project", commonTags.project);
+    Tags.of(this.webService).add("env", env);
+
+    // ---- Autoscaling: web service (min 1 / max 4, CPU target 60%) ----
+    const webScaling = this.webService.autoScaleTaskCount({ minCapacity: 1, maxCapacity: 4 });
+    webScaling.scaleOnCpuUtilization("WebCpuScaling", {
+      targetUtilizationPercent: 60,
+      scaleInCooldown: Duration.seconds(60),
+      scaleOutCooldown: Duration.seconds(60),
     });
 
     // ---- API service (Rust gRPC) ----
@@ -325,7 +383,7 @@ export class AppStack extends Stack {
       },
     });
 
-    // ---- ALB target groups + listener ----
+    // ---- ALB target groups + listeners ----
     const webTg = new ApplicationTargetGroup(this, "WebTg", {
       vpc: props.vpc,
       port: 3000,
@@ -333,7 +391,7 @@ export class AppStack extends Stack {
       targetType: TargetType.IP,
       targets: [this.webService],
       healthCheck: {
-        path: "/",
+        path: "/healthz",
         interval: Duration.seconds(30),
         timeout: Duration.seconds(5),
         healthyThresholdCount: 2,
@@ -342,6 +400,8 @@ export class AppStack extends Stack {
       },
       deregistrationDelay: Duration.seconds(30),
     });
+    Tags.of(webTg).add("project", commonTags.project);
+    Tags.of(webTg).add("env", env);
 
     const apiTg = new ApplicationTargetGroup(this, "ApiTg", {
       vpc: props.vpc,
@@ -361,12 +421,28 @@ export class AppStack extends Stack {
       deregistrationDelay: Duration.seconds(30),
     });
 
-    const httpListener = this.loadBalancer.addListener("HttpListener", {
+    // HTTP listener: redirect all traffic to HTTPS
+    this.loadBalancer.addListener("HttpListener", {
       port: 80,
       protocol: ApplicationProtocol.HTTP,
+      defaultAction: ListenerAction.redirect({
+        protocol: "HTTPS",
+        port: "443",
+        permanent: true,
+      }),
+    });
+
+    // HTTPS listener (port 443) with ACM certificate
+    const httpsListener = this.loadBalancer.addListener("HttpsListener", {
+      port: 443,
+      protocol: ApplicationProtocol.HTTPS,
+      certificates: [props.certificate],
       defaultAction: ListenerAction.forward([webTg]),
     });
-    httpListener.addAction("ApiAction", {
+    Tags.of(httpsListener).add("project", commonTags.project);
+    Tags.of(httpsListener).add("env", env);
+
+    httpsListener.addAction("ApiAction", {
       priority: 10,
       conditions: [
         ListenerCondition.pathPatterns(["/grpc/*", "/aquascape.v1.*"]),
@@ -380,22 +456,15 @@ export class AppStack extends Stack {
       description: "ALB DNS name for CloudFront origin",
     });
 
-    // ---- CloudFront behaviors → ALB ----
-    const albOrigin = new LoadBalancerV2Origin(this.loadBalancer, {
-      protocolPolicy: OriginProtocolPolicy.HTTP_ONLY,
-      httpPort: 80,
-      readTimeout: Duration.seconds(60),
-      keepaliveTimeout: Duration.seconds(5),
+    // ---- Export ALB DNS name for EdgeStack to consume via Fn::ImportValue ----
+    // CloudFront behaviors are wired in EdgeStack.wireAlbBehaviors() using
+    // Fn.importValue so that the ALB DNS is NOT a synth-time CDK cross-stack
+    // Ref (which would create a dependency cycle). CloudFormation handles the
+    // deploy-time ordering via stack exports.
+    new CfnOutput(this, "AlbDnsExport", {
+      value: this.loadBalancer.loadBalancerDnsName,
+      exportName: albDnsExportName(env),
     });
-    for (const pattern of ["/grpc/*", "/api/*", "/app/*"]) {
-      props.distribution.addBehavior(pattern, albOrigin, {
-        viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        allowedMethods: AllowedMethods.ALLOW_ALL,
-        cachePolicy: CachePolicy.CACHING_DISABLED,
-        originRequestPolicy: OriginRequestPolicy.ALL_VIEWER,
-        compress: true,
-      });
-    }
 
     // ---- Alarms (web 5xx, api 5xx, latency) ----
     for (const [tgName, tg] of [

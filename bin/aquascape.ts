@@ -4,7 +4,7 @@ import * as cdk from "aws-cdk-lib";
 import { BootstrapStack } from "../lib/stacks/BootstrapStack";
 import { NetworkStack } from "../lib/stacks/NetworkStack";
 import { EdgeStack } from "../lib/stacks/EdgeStack";
-import { AppStack } from "../lib/stacks/AppStack";
+import { AppStack, albDnsExportName } from "../lib/stacks/AppStack";
 
 const app = new cdk.App();
 
@@ -49,9 +49,14 @@ const edge = new EdgeStack(app, `AquascapeStudio-Edge-${envName}`, {
 const appStack = new AppStack(app, `AquascapeStudio-App-${envName}`, {
   ...common,
   vpc: network.vpc,
-  distribution: edge.distribution,
+  certificate: edge.certificate,
 });
 appStack.addDependency(network);
 appStack.addDependency(edge);
+
+// Wire CloudFront → ALB behaviors AFTER AppStack is created.
+// Uses Fn.importValue(albDnsExportName) inside wireAlbBehaviors() to avoid
+// a CDK synth-time dependency cycle (EdgeStack ↔ AppStack).
+edge.wireAlbBehaviors(albDnsExportName(envName));
 
 app.synth();
