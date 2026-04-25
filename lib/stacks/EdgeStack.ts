@@ -17,6 +17,7 @@ import { OriginProtocolPolicy } from "aws-cdk-lib/aws-cloudfront";
 import { Certificate, CertificateValidation, ICertificate } from "aws-cdk-lib/aws-certificatemanager";
 import { HostedZone, ARecord, AaaaRecord, RecordTarget } from "aws-cdk-lib/aws-route53";
 import { CloudFrontTarget } from "aws-cdk-lib/aws-route53-targets";
+import { CfnWebACL } from "aws-cdk-lib/aws-wafv2";
 
 export interface EdgeStackProps extends StackProps {
   envName: "dev" | "stage" | "prod";
@@ -64,6 +65,70 @@ export class EdgeStack extends Stack {
       autoDeleteObjects: props.envName !== "prod",
     });
 
+    // WAF WebACL (CloudFront scope must be in us-east-1, same as this stack).
+    // Rules: AWS Managed Common + IP Reputation + rate limit per IP.
+    const waf = new CfnWebACL(this, "Waf", {
+      name: `aquascape-${props.envName}`,
+      scope: "CLOUDFRONT",
+      defaultAction: { allow: {} },
+      visibilityConfig: {
+        sampledRequestsEnabled: true,
+        cloudWatchMetricsEnabled: true,
+        metricName: `aquascape-${props.envName}`,
+      },
+      rules: [
+        {
+          name: "IPReputation",
+          priority: 10,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesAmazonIpReputationList",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "IPReputation",
+          },
+        },
+        {
+          name: "CommonRules",
+          priority: 20,
+          statement: {
+            managedRuleGroupStatement: {
+              vendorName: "AWS",
+              name: "AWSManagedRulesCommonRuleSet",
+            },
+          },
+          overrideAction: { none: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "CommonRules",
+          },
+        },
+        {
+          // Block IPs that exceed 2000 req / 5 min.
+          name: "RateLimit",
+          priority: 30,
+          statement: {
+            rateBasedStatement: {
+              limit: 2000,
+              aggregateKeyType: "IP",
+            },
+          },
+          action: { block: {} },
+          visibilityConfig: {
+            sampledRequestsEnabled: true,
+            cloudWatchMetricsEnabled: true,
+            metricName: "RateLimit",
+          },
+        },
+      ],
+    });
+
     this.distribution = new Distribution(this, "Distribution", {
       defaultBehavior: {
         origin: S3BucketOrigin.withOriginAccessControl(this.siteBucket),
@@ -81,6 +146,7 @@ export class EdgeStack extends Stack {
       httpVersion: HttpVersion.HTTP2_AND_3,
       defaultRootObject: "index.html",
       enableLogging: props.envName === "prod",
+      webAclId: waf.attrArn,
     });
 
     new ARecord(this, "AliasA", {
@@ -128,7 +194,7 @@ export class EdgeStack extends Stack {
       keepaliveTimeout: Duration.seconds(5),
     });
 
-    for (const pattern of ["/grpc/*", "/api/*", "/app/*"]) {
+    for (const pattern of ["/grpc/*", "/api/*", "/*"]) {
       this.distribution.addBehavior(pattern, albOrigin, {
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         allowedMethods: AllowedMethods.ALLOW_ALL,
