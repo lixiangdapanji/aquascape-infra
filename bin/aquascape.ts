@@ -55,8 +55,6 @@ appStack.addDependency(network);
 appStack.addDependency(edge);
 
 // Wire CloudFront → ALB behaviors AFTER AppStack is created.
-// Uses Fn.importValue(albDnsExportName) inside wireAlbBehaviors() to avoid
-// a CDK synth-time dependency cycle (EdgeStack ↔ AppStack).
 edge.wireAlbBehaviors(albDnsExportName(envName));
 
 app.synth();
