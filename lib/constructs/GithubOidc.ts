@@ -54,6 +54,16 @@ export class GithubOidc extends Construct {
             : [ManagedPolicy.fromAwsManagedPolicyName("PowerUserAccess")],
       });
 
+      // PowerUserAccess excludes iam:*, but registering an ECS task definition
+      // requires iam:PassRole to hand the task/execution roles to ECS.
+      if (env !== "prod") {
+        role.addToPolicy(new PolicyStatement({
+          effect: Effect.ALLOW,
+          actions: ["iam:PassRole", "iam:GetRole"],
+          resources: [`arn:aws:iam::*:role/AquascapeStudio-App-${env}-*`],
+        }));
+      }
+
       if (env === "prod") {
         role.addToPolicy(new PolicyStatement({
           effect: Effect.ALLOW,
