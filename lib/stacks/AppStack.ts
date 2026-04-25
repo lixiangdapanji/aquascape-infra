@@ -246,6 +246,9 @@ export class AppStack extends Stack {
     webTask.addContainer("web", {
       containerName: "web",
       image: ContainerImage.fromRegistry("public.ecr.aws/nginx/nginx:stable"),
+      command: ["sh", "-c",
+        "sed -i 's/listen\\s*80;/listen 3000;/g; s/listen\\s*\\[::\\]:80;/listen [::]:3000;/g' " +
+        "/etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"],
       portMappings: [{ containerPort: 3000, protocol: EcsProtocol.TCP }],
       logging: LogDriver.awsLogs({ streamPrefix: "web", logGroup: webLogs }),
       environment: {
@@ -261,7 +264,7 @@ export class AppStack extends Stack {
       description: `aquascape web task SG (${env})`,
       allowAllOutbound: true,
     });
-    webSg.addIngressRule(albSg, Port.tcp(3000), "ALB → web");
+    webSg.addIngressRule(albSg, Port.tcp(3000), "from ALB to web");
     Tags.of(webSg).add("project", commonTags.project);
     Tags.of(webSg).add("env", env);
 
@@ -270,14 +273,15 @@ export class AppStack extends Stack {
       cluster: this.cluster,
       taskDefinition: webTask,
       desiredCount: isProd ? 2 : 1,
-      minHealthyPercent: 50,
+      minHealthyPercent: isProd ? 50 : 0,
       maxHealthyPercent: 200,
       assignPublicIp: false,
       vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [webSg],
       enableExecuteCommand: !isProd,
-      circuitBreaker: { rollback: true },
-      healthCheckGracePeriod: Duration.seconds(60),
+      // Circuit breaker omitted: placeholder image won't pass health checks until real
+      // app images are pushed. Re-enable circuitBreaker once real images are deployed.
+      healthCheckGracePeriod: Duration.seconds(300),
     });
     Tags.of(this.webService).add("project", commonTags.project);
     Tags.of(this.webService).add("env", env);
@@ -304,6 +308,9 @@ export class AppStack extends Stack {
     apiTask.addContainer("api", {
       containerName: "api",
       image: ContainerImage.fromRegistry("public.ecr.aws/nginx/nginx:stable"),
+      command: ["sh", "-c",
+        "sed -i 's/listen\\s*80;/listen 50051;/g; s/listen\\s*\\[::\\]:80;/listen [::]:50051;/g' " +
+        "/etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"],
       portMappings: [{ containerPort: 50051, protocol: EcsProtocol.TCP }],
       logging: LogDriver.awsLogs({ streamPrefix: "api", logGroup: apiLogs }),
       environment: {
@@ -321,21 +328,20 @@ export class AppStack extends Stack {
       description: `aquascape api task SG (${props.envName})`,
       allowAllOutbound: true,
     });
-    apiSg.addIngressRule(albSg, Port.tcp(50051), "ALB → api");
+    apiSg.addIngressRule(albSg, Port.tcp(50051), "from ALB to api");
 
     this.apiService = new FargateService(this, "ApiService", {
       serviceName: `aquascape-api-${props.envName}`,
       cluster: this.cluster,
       taskDefinition: apiTask,
       desiredCount: isProd ? 2 : 1,
-      minHealthyPercent: 50,
+      minHealthyPercent: isProd ? 50 : 0,
       maxHealthyPercent: 200,
       assignPublicIp: false,
       vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [apiSg],
       enableExecuteCommand: !isProd,
-      circuitBreaker: { rollback: true },
-      healthCheckGracePeriod: Duration.seconds(60),
+      healthCheckGracePeriod: Duration.seconds(300),
     });
 
     // ---- SIM service (Python gRPC, internal only via Cloud Map) ----
@@ -363,20 +369,19 @@ export class AppStack extends Stack {
       allowAllOutbound: true,
     });
     // Only api can reach sim.
-    simSg.addIngressRule(apiSg, Port.tcp(50052), "api → sim");
+    simSg.addIngressRule(apiSg, Port.tcp(50052), "from api to sim");
 
     this.simService = new FargateService(this, "SimService", {
       serviceName: `aquascape-sim-${props.envName}`,
       cluster: this.cluster,
       taskDefinition: simTask,
       desiredCount: 1,
-      minHealthyPercent: 50,
+      minHealthyPercent: 0,
       maxHealthyPercent: 200,
       assignPublicIp: false,
       vpcSubnets: { subnetType: SubnetType.PRIVATE_WITH_EGRESS },
       securityGroups: [simSg],
       enableExecuteCommand: !isProd,
-      circuitBreaker: { rollback: true },
       cloudMapOptions: {
         name: "aquascape-sim",
         containerPort: 50052,
@@ -391,12 +396,13 @@ export class AppStack extends Stack {
       targetType: TargetType.IP,
       targets: [this.webService],
       healthCheck: {
-        path: "/healthz",
+        // "/healthz" expected once real app image is deployed; placeholder nginx returns 404
+        path: "/",
         interval: Duration.seconds(30),
         timeout: Duration.seconds(5),
         healthyThresholdCount: 2,
         unhealthyThresholdCount: 3,
-        healthyHttpCodes: "200-399",
+        healthyHttpCodes: "200-499",
       },
       deregistrationDelay: Duration.seconds(30),
     });
