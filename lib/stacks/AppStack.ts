@@ -243,6 +243,9 @@ export class AppStack extends Stack {
       ],
     }));
 
+    // Grant execution role permission to pull from the web ECR repo.
+    webRepo.grantPull(webTask.obtainExecutionRole());
+
     webTask.addContainer("web", {
       containerName: "web",
       image: ContainerImage.fromRegistry("public.ecr.aws/nginx/nginx:stable"),
@@ -252,7 +255,7 @@ export class AppStack extends Stack {
       portMappings: [{ containerPort: 3000, protocol: EcsProtocol.TCP }],
       logging: LogDriver.awsLogs({ streamPrefix: "web", logGroup: webLogs }),
       environment: {
-        NODE_ENV: isProd ? "production" : "development",
+        NODE_ENV: "production",
         AQUASCAPE_ENV: env,
         NEXT_PUBLIC_API_BASE_URL: `https://${env === "prod" ? "" : `${env}.`}${props.domainName}/grpc`,
       },
