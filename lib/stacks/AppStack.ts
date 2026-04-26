@@ -307,6 +307,7 @@ export class AppStack extends Stack {
     scapesTable.grantReadWriteData(apiTask.taskRole);
     speciesTable.grantReadData(apiTask.taskRole);
     uploads.grantReadWrite(apiTask.taskRole);
+    apiRepo.grantPull(apiTask.obtainExecutionRole());
 
     apiTask.addContainer("api", {
       containerName: "api",
@@ -354,6 +355,7 @@ export class AppStack extends Stack {
       cpu: 512,
       memoryLimitMiB: 1024,
     });
+    simRepo.grantPull(simTask.obtainExecutionRole());
     simTask.addContainer("sim", {
       containerName: "sim",
       image: ContainerImage.fromRegistry("public.ecr.aws/nginx/nginx:stable"),
