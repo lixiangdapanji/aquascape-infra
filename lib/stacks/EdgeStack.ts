@@ -144,7 +144,7 @@ export class EdgeStack extends Stack {
       certificate: this.certificate,
       priceClass: PriceClass.PRICE_CLASS_100,
       httpVersion: HttpVersion.HTTP2_AND_3,
-      defaultRootObject: "index.html",
+
       enableLogging: props.envName === "prod",
       webAclId: waf.attrArn,
     });
