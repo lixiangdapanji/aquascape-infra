@@ -135,6 +135,14 @@ export class AppStack extends Stack {
       removalPolicy: isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
     });
 
+    const usersTable = new Table(this, "UsersTable", {
+      tableName: `aquascape-users-${props.envName}`,
+      partitionKey: { name: "email", type: AttributeType.STRING },
+      billingMode: BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: isProd },
+      removalPolicy: isProd ? RemovalPolicy.RETAIN : RemovalPolicy.DESTROY,
+    });
+
     // ---- S3: uploads ----
     const uploads = new Bucket(this, "UploadsBucket", {
       bucketName: `aquascape-uploads-${props.envName}-${this.account}`,
@@ -246,6 +254,8 @@ export class AppStack extends Stack {
     // Grant execution role permission to pull from the web ECR repo.
     webRepo.grantPull(webTask.obtainExecutionRole());
 
+    usersTable.grantReadWriteData(webTask.taskRole);
+
     webTask.addContainer("web", {
       containerName: "web",
       image: ContainerImage.fromRegistry("public.ecr.aws/nginx/nginx:stable"),
@@ -258,6 +268,7 @@ export class AppStack extends Stack {
         NODE_ENV: "production",
         AQUASCAPE_ENV: env,
         NEXT_PUBLIC_API_BASE_URL: `https://${env === "prod" ? "" : `${env}.`}${props.domainName}/grpc`,
+        DDB_TABLE_USERS: usersTable.tableName,
       },
       essential: true,
     });
